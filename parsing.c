@@ -26,6 +26,36 @@ void add_history(char* unused) {}
 #include <editline/readline.h>
 #endif
 
+long eval_op(long x, char* op, long y) {
+	if (strcmp(op, "+") == 0) { return x + y; }
+	if (strcmp(op, "-") == 0) { return x - y; }
+	if (strcmp(op, "*") == 0) { return x * y; }
+	if (strcmp(op, "/") == 0) { return x / y; }
+	return 0;
+}
+
+long eval(mpc_ast_t* t) {
+
+	/* If tagged as number return it directly */
+	if (strstr(t->tag, "number")) {
+		return atoi(t->contents);
+	}
+
+	/* operator is always the second child */
+	char* op = t->children[1]->contents;
+
+	/* starting evaluating */
+	long x = eval(t->children[2]);
+	
+	/* iterate the remaining children and combining */
+	int i = 3;
+	while (strstr(t->children[i]->tag, "expr")) {
+		x = eval_op(x, op, eval(t->children[i]));
+		i++;
+	}
+	return x;
+}
+
 int main(int argc, char** argv) {
 
 	/* Create Some Parsers */
@@ -67,8 +97,7 @@ int main(int argc, char** argv) {
 		mpc_result_t r;
 		if (mpc_parse("<stdin>", input, Lispy, &r)) {
 			mpc_ast_t* a = r.output;
-			printf("the first child tag is %s", a->children[0]->tag);
-			mpc_ast_print(r.output);
+			printf("Result is %li \n", eval(a));
 			mpc_ast_delete(r.output);
 		} else {
 			mpc_err_print(r.error);
