@@ -31,6 +31,10 @@ long eval_op(long x, char* op, long y) {
 	if (strcmp(op, "-") == 0) { return x - y; }
 	if (strcmp(op, "*") == 0) { return x * y; }
 	if (strcmp(op, "/") == 0) { return x / y; }
+
+	/* min and max could be evaluated recursively */
+	if (strcmp(op, "min") == 0) { return x < y ? x : y;}
+	if (strcmp(op, "max") == 0) { return x < y ? y : x;}
 	return 0;
 }
 
@@ -46,7 +50,7 @@ long eval(mpc_ast_t* t) {
 
 	/* starting evaluating */
 	long x = eval(t->children[2]);
-	
+
 	/* iterate the remaining children and combining */
 	int i = 3;
 	while (strstr(t->children[i]->tag, "expr")) {
@@ -67,11 +71,11 @@ int main(int argc, char** argv) {
 	/* Define them with the following language */
 	/* number could be negative and we allow multiple preceding zeros */
 	mpca_lang(MPCA_LANG_DEFAULT,
-			"																										 \
-			  number		: /-?[0-9]+/ ;													 \
-				operator	: '+' | '-' | '*' | '/' ;								 \
-				expr			: <number> | '(' <operator> <expr>+ ')'; \
-				lispy		  : /^/ <operator> <expr>+ /$/ ;					 \
+			"																										  	 \
+			  number		: /-?[0-9]+/ ;													 		 \
+				operator	: '+' | '-' | '*' | '/' | \"min\" | \"max\"; \
+				expr			: <number> | '(' <operator> <expr>+ ')'; 		 \
+				lispy		  : /^/ <operator> <expr>+ /$/ ;					     \
 			",
 			Number, Operator, Expr, Lispy);
 
