@@ -205,6 +205,12 @@ void lval_println(lval *v) {
   putchar('\n');
 }
 
+#define LASSERT(args, cond, err)                                               \
+  if (!(cond)) {                                                               \
+    lval_del(args);                                                            \
+    return lval_err(err);                                                      \
+  }
+
 lval *lval_eval_sexpr(lval *v);
 lval *lval_eval(lval *v) {
   if (v->type == LVAL_SEXPR) {
@@ -292,6 +298,129 @@ lval *builtin_op(lval *a, char *op) {
   return x;
 }
 
+/* Support Q-Expression:
+ * lispy> list 1 2 3 4
+ * {1 2 3 4}
+ * lispy> head (list 1 2 3 4)
+ * {1}
+ * lispy> eval {head (list 1 2 3 4)}
+ * {1}
+ * lispy> eval head (list 1 2 3 4)
+ * 1
+ * lispy> tail {tail tail tail}
+ * {tail tail}
+ * lispy> eval (tail {tail tail {5 6 7}})
+ * {6 7}
+ * lispy> eval (head {(+ 1 2) (+ 10 20)})
+ * 3
+ */
+/*
+ * Takes a Q-Expression and returns a Q-Expression with only of the first
+ * element
+ */
+lval *builtin_head(lval *a) {
+  LASSERT(a, a->count == 1, "Function 'head' passed too many arguments!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+          "Function 'head' passed incorrect type!");
+  LASSERT(a, a->cell[0]->count != 0, "Function 'head' passed {}!");
+
+  lval *v = lval_take(a, 0);
+  while (v->count > 1) {
+    lval_del(lval_pop(v, 1));
+  }
+  return v;
+}
+
+/*
+ * Takes a Q-Expression and returns a Q-Expression with the first element
+ * removed
+ */
+lval *builtin_tail(lval *a) {
+  LASSERT(a, a->count == 1, "Function 'tail' passed too many arguments!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+          "Function 'tail' passed incorrect type!");
+  LASSERT(a, a->cell[0]->count != 0, "Function 'tail' passed {}!");
+
+  if (a->cell[0]->count == 0) {
+    lval_del(a);
+    return lval_err("Function 'tail' passed {}!");
+  }
+
+  /* Take first argument */
+  lval *v = lval_take(a, 0);
+  lval_del(lval_pop(v, 0));
+  return v;
+}
+
+/*
+ * Takes one or more arguments and returns a new Q-Expression containing the
+ * arguments
+ */
+lval *builtin_list(lval *a) {
+  a->type = LVAL_QEXPR;
+  return a;
+}
+
+/*
+ * Takes a Q-Expression and evaluates it as if it were a S-Expression
+ */
+lval *builtin_eval(lval *a) {
+  LASSERT(a, a->count == 1, "Function 'eval' passed too many arguments!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+          "Function 'eval' passed incorrect type!");
+  lval *x = lval_take(a, 0);
+  x->type = LVAL_SEXPR;
+  return lval_eval(x);
+}
+
+lval *lval_join(lval *x, lval *y) {
+  while (y->count) {
+    x = lval_add(x, lval_pop(y, 0));
+  }
+  lval_del(y);
+  return x;
+}
+
+/*
+ * Takes one or more Q-Expressions and returns a Q-Expression of them conjoined
+ * together
+ */
+lval *builtin_join(lval *a) {
+  for (int i = 0; i < a->count; i++) {
+    LASSERT(a, a->cell[i]->type == LVAL_QEXPR,
+            "Function 'join' passed incorrect type.");
+  }
+  lval *x = lval_pop(a, 0);
+  while (a->count) {
+    x = lval_join(x, lval_pop(a, 0));
+  }
+  lval_del(a);
+  return x;
+}
+
+lval *builtin(lval *a, char *func) {
+  if (strcmp("list", func) == 0) {
+    return builtin_list(a);
+  }
+  if (strcmp("head", func) == 0) {
+    return builtin_head(a);
+  }
+  if (strcmp("tail", func) == 0) {
+    return builtin_tail(a);
+  }
+  if (strcmp("join", func) == 0) {
+    return builtin_join(a);
+  }
+  if (strcmp("eval", func) == 0) {
+    return builtin_eval(a);
+  }
+  if (strstr("+-/*", func)) {
+    return builtin_op(a, func);
+  }
+  lval_del(a);
+  return lval_err("Unknown Function!");
+}
+
 lval *lval_eval_sexpr(lval *v) {
   for (int i = 0; i < v->count; i++) {
     v->cell[i] = lval_eval(v->cell[i]);
@@ -322,7 +451,7 @@ lval *lval_eval_sexpr(lval *v) {
   }
 
   /* Call builtin with operator */
-  lval *result = builtin_op(v, f->sym);
+  lval *result = builtin(v, f->sym);
   lval_del(f);
   return result;
 }
@@ -365,7 +494,9 @@ int main(int argc, char **argv) {
       MPCA_LANG_DEFAULT,
       "																										      \
 			  number		: /-?[0-9]+/ ;													      \
-				symbol		: '+' | '-' | '*' | '/' | \"min\" | \"max\";  \
+				symbol		: '+' | '-' | '*' | '/' | \"min\" | \"max\"   \
+									| \"list\" | \"head\" | \"tail\" | \"join\"		\
+									| \"eval\";  																	\
 				sexpr 		: '(' <expr>* ')';                            \
 				qexpr     : '{' <expr>* '}';                            \
 				expr			: <number> | <symbol> | <sexpr> | <qexpr> ;   \
