@@ -26,8 +26,23 @@ void add_history(char *unused) {}
 #include <editline/readline.h>
 #endif
 
+/* Forward Declarations */
+struct lval;
+struct lenv;
+typedef struct lval lval;
+typedef struct lenv lenv;
+
+/* Let's define function pointers to allow user-defined operations!
+ *
+ * NOTE: notice the first arg is a pointer to the environment
+ * "To get an lval* we dereference lbuiltin and call it with a lenv* and a
+ * lval*." Therefore lbuiltin must be a function pointer that takes an lenv* and
+ * a lval* and returns a lval*.
+ */
+typedef lval *(*lbuiltin)(lenv *, lval *);
+
 /* Create Enumeration of Possible lval Types */
-enum { LVAL_NUM, LVAL_ERR, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR };
+enum { LVAL_NUM, LVAL_ERR, LVAL_FUN, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR };
 
 /* Create Enumeration of Possible Error Types */
 enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
@@ -37,19 +52,20 @@ enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
  * rule below) However, "struct" is fixed sized, so we have to use a double star
  * pointer to point to a list of "lval"s.
  */
-typedef struct lval {
+struct lval {
   int type;
   long num;
 
   /* Error and Symbol types have some string data */
   char *err;
   char *sym;
+  lbuiltin fun;
 
   /* Count and Pointer to an array of "lval*" */
   int count;
   /* NOTE: use 'struct lval' to refer to itself inside the definition */
   struct lval **cell;
-} lval;
+};
 
 lval *lval_num(long x) {
   lval *v = malloc(sizeof(lval));
@@ -79,6 +95,13 @@ lval *lval_sym(char *s) {
   return v;
 }
 
+lval *lval_fun(lbuiltin func) {
+  lval *v = malloc(sizeof(lval));
+  v->type = LVAL_FUN;
+  v->fun = func;
+  return v;
+}
+
 lval *lval_sexpr(void) {
   lval *v = malloc(sizeof(lval));
   v->type = LVAL_SEXPR;
@@ -99,6 +122,7 @@ lval *lval_qexpr(void) {
 void lval_del(lval *v) {
   switch (v->type) {
   case LVAL_NUM:
+  case LVAL_FUN:
     break;
   case LVAL_ERR:
     free(v->err);
@@ -188,6 +212,9 @@ void lval_print(lval *v) {
   case LVAL_ERR:
     printf("Error: %s", v->err);
     break;
+  case LVAL_FUN:
+    printf("<func>");
+    break;
   case LVAL_SYM:
     printf("%s", v->sym);
     break;
@@ -205,16 +232,122 @@ void lval_println(lval *v) {
   putchar('\n');
 }
 
+lval *lval_copy(lval *v) {
+  lval *x = malloc(sizeof(lval));
+  x->type = v->type;
+  switch (v->type) {
+  /* Copy Functions and Numbers Directly */
+  case LVAL_FUN:
+    x->fun = v->fun;
+    break;
+  case LVAL_NUM:
+    x->num = v->num;
+    break;
+
+  /* Copy Strings using malloc and strcpy */
+  case LVAL_ERR:
+    x->err = malloc(strlen(v->err) + 1);
+    strcpy(x->err, v->err);
+    break;
+  case LVAL_SYM:
+    x->sym = malloc(strlen(v->sym) + 1);
+    strcpy(x->sym, v->sym);
+    break;
+
+  /* Copy Lists by copying each sub-expression */
+  case LVAL_SEXPR:
+  case LVAL_QEXPR:
+    x->count = v->count;
+    x->cell = malloc(sizeof(lval *) * x->count);
+    for (int i = 0; i < x->count; i++) {
+      x->cell[i] = lval_copy(v->cell[i]);
+    }
+    break;
+  }
+  return x;
+}
+
+/*
+ * Envroment structure encode a list of relationships between names and values
+ */
+struct lenv {
+  int count;
+  char **syms;
+  lval **vals;
+};
+
+lenv *lenv_new(void) {
+  lenv *env = malloc(sizeof(lenv));
+  env->count = 0;
+  env->syms = NULL;
+  env->vals = NULL;
+  return env;
+}
+
+void lenv_del(lenv *e) {
+  for (int i = 0; i < e->count; i++) {
+    free(e->syms[i]);
+    lval_del(e->vals[i]);
+  }
+  free(e->syms);
+  free(e->vals);
+  free(e);
+}
+
+lval *lenv_get(lenv *e, lval *k) {
+  if (k->type == LVAL_SYM) {
+    for (int i = 0; i < e->count; i++) {
+      if (strcmp(e->syms[i], k->sym) == 0) {
+        return lval_copy(e->vals[i]);
+      }
+    }
+  }
+  return lval_err("unbound symbol!");
+}
+
+void lenv_put(lenv *e, lval *k, lval *v) {
+  if (k->type != LVAL_SYM) {
+    return;
+  }
+  for (int i = 0; i < e->count; i++) {
+    if (strcmp(e->syms[i], k->sym) == 0) {
+      lval_del(e->vals[i]);
+      e->vals[i] = lval_copy(v);
+      return;
+    }
+  }
+
+  e->count++;
+  e->vals = realloc(e->vals, sizeof(lval *) * e->count);
+  e->syms = realloc(e->syms, sizeof(char *) * e->count);
+  e->vals[e->count - 1] = lval_copy(v);
+  e->syms[e->count - 1] = malloc(strlen(k->sym) + 1);
+  strcpy(e->syms[e->count - 1], k->sym);
+}
+
+void lenv_add_builtin(lenv *e, char *name, lbuiltin func) {
+  lval *k = lval_sym(name);
+  lval *v = lval_fun(func);
+  lenv_put(e, k, v);
+  lval_del(k);
+  lval_del(v);
+}
+
 #define LASSERT(args, cond, err)                                               \
   if (!(cond)) {                                                               \
     lval_del(args);                                                            \
     return lval_err(err);                                                      \
   }
 
-lval *lval_eval_sexpr(lval *v);
-lval *lval_eval(lval *v) {
+lval *lval_eval_sexpr(lenv *e, lval *v);
+lval *lval_eval(lenv *e, lval *v) {
+  if (v->type == LVAL_SYM) {
+    lval *x = lenv_get(e, v);
+    lval_del(v);
+    return x;
+  }
   if (v->type == LVAL_SEXPR) {
-    return lval_eval_sexpr(v);
+    return lval_eval_sexpr(e, v);
   }
   /* All other lval types remain the same */
   return v;
@@ -239,7 +372,7 @@ lval *lval_take(lval *v, size_t to_move) {
   return res;
 }
 
-lval *builtin_op(lval *a, char *op) {
+lval *builtin_op(lenv *e, lval *a, char *op) {
 
   /* Ensure all elements are numbers */
   for (int i = 0; i < a->count; i++) {
@@ -298,6 +431,13 @@ lval *builtin_op(lval *a, char *op) {
   return x;
 }
 
+lval *builtin_add(lenv *e, lval *a) { return builtin_op(e, a, "+"); }
+lval *builtin_sub(lenv *e, lval *a) { return builtin_op(e, a, "-"); }
+lval *builtin_mul(lenv *e, lval *a) { return builtin_op(e, a, "*"); }
+lval *builtin_div(lenv *e, lval *a) { return builtin_op(e, a, "/"); }
+lval *builtin_min(lenv *e, lval *a) { return builtin_op(e, a, "min"); }
+lval *builtin_max(lenv *e, lval *a) { return builtin_op(e, a, "max"); }
+
 /* Support Q-Expression:
  * lispy> list 1 2 3 4
  * {1 2 3 4}
@@ -318,7 +458,7 @@ lval *builtin_op(lval *a, char *op) {
  * Takes a Q-Expression and returns a Q-Expression with only of the first
  * element
  */
-lval *builtin_head(lval *a) {
+lval *builtin_head(lenv *e, lval *a) {
   LASSERT(a, a->count == 1, "Function 'head' passed too many arguments!");
   LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
           "Function 'head' passed incorrect type!");
@@ -335,7 +475,7 @@ lval *builtin_head(lval *a) {
  * Takes a Q-Expression and returns a Q-Expression with the first element
  * removed
  */
-lval *builtin_tail(lval *a) {
+lval *builtin_tail(lenv *e, lval *a) {
   LASSERT(a, a->count == 1, "Function 'tail' passed too many arguments!");
   LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
           "Function 'tail' passed incorrect type!");
@@ -356,7 +496,7 @@ lval *builtin_tail(lval *a) {
  * Takes one or more arguments and returns a new Q-Expression containing the
  * arguments
  */
-lval *builtin_list(lval *a) {
+lval *builtin_list(lenv *e, lval *a) {
   a->type = LVAL_QEXPR;
   return a;
 }
@@ -364,13 +504,13 @@ lval *builtin_list(lval *a) {
 /*
  * Takes a Q-Expression and evaluates it as if it were a S-Expression
  */
-lval *builtin_eval(lval *a) {
+lval *builtin_eval(lenv *e, lval *a) {
   LASSERT(a, a->count == 1, "Function 'eval' passed too many arguments!");
   LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
           "Function 'eval' passed incorrect type!");
   lval *x = lval_take(a, 0);
   x->type = LVAL_SEXPR;
-  return lval_eval(x);
+  return lval_eval(e, x);
 }
 
 lval *lval_join(lval *x, lval *y) {
@@ -385,7 +525,7 @@ lval *lval_join(lval *x, lval *y) {
  * Takes one or more Q-Expressions and returns a Q-Expression of them conjoined
  * together
  */
-lval *builtin_join(lval *a) {
+lval *builtin_join(lenv *e, lval *a) {
   for (int i = 0; i < a->count; i++) {
     LASSERT(a, a->cell[i]->type == LVAL_QEXPR,
             "Function 'join' passed incorrect type.");
@@ -398,7 +538,7 @@ lval *builtin_join(lval *a) {
   return x;
 }
 
-lval *builtin_cons(lval *a) {
+lval *builtin_cons(lenv *e, lval *a) {
   LASSERT(a, a->count > 1, "Function 'cons' passed too few arguments!");
   LASSERT(a, a->cell[1]->type == LVAL_QEXPR && a->cell[0]->type == LVAL_NUM,
           "Function 'cons' passed wrong types!");
@@ -406,36 +546,49 @@ lval *builtin_cons(lval *a) {
   return a;
 }
 
-lval *builtin(lval *a, char *func) {
-  if (strcmp("list", func) == 0) {
-    return builtin_list(a);
+lval *builtin_def(lenv *e, lval *a) {
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+          "Function 'def' passed incorrect type!");
+
+  lval *syms = a->cell[0];
+  for (int i = 0; i < syms->count; i++) {
+    LASSERT(a, syms->cell[i]->type == LVAL_SYM,
+            "Function 'def' cannot define non-symbol");
   }
-  if (strcmp("head", func) == 0) {
-    return builtin_head(a);
-  }
-  if (strcmp("tail", func) == 0) {
-    return builtin_tail(a);
-  }
-  if (strcmp("join", func) == 0) {
-    return builtin_join(a);
-  }
-  if (strcmp("eval", func) == 0) {
-    return builtin_eval(a);
-  }
-  if (strcmp("cons", func) == 0) {
-    return builtin_cons(a);
-  }
-  if (strstr("+-/*", func) || strcmp("max", func) == 0 ||
-      strcmp("min", func) == 0) {
-    return builtin_op(a, func);
+  /* Check correct number of symbols and values */
+  LASSERT(a, syms->count == a->count - 1,
+          "Function 'def' cannot define incorrect number of values to symbols");
+  for (int i = 0; i < syms->count; i++) {
+    lenv_put(e, syms->cell[i], a->cell[i + 1]);
   }
   lval_del(a);
-  return lval_err("Unknown Function!");
+  return lval_sexpr();
 }
 
-lval *lval_eval_sexpr(lval *v) {
+void lenv_add_builtins(lenv *e) {
+  /* List Functions */
+  lenv_add_builtin(e, "list", builtin_list);
+  lenv_add_builtin(e, "head", builtin_head);
+  lenv_add_builtin(e, "tail", builtin_tail);
+  lenv_add_builtin(e, "eval", builtin_eval);
+  lenv_add_builtin(e, "join", builtin_join);
+  lenv_add_builtin(e, "min", builtin_min);
+  lenv_add_builtin(e, "max", builtin_max);
+
+  /* Mathematical Functions */
+  lenv_add_builtin(e, "+", builtin_add);
+  lenv_add_builtin(e, "-", builtin_sub);
+  lenv_add_builtin(e, "*", builtin_mul);
+  lenv_add_builtin(e, "/", builtin_div);
+
+  /* Variable Functions */
+  lenv_add_builtin(e, "def", builtin_def);
+}
+
+lval *lval_eval_sexpr(lenv *e, lval *v) {
+
   for (int i = 0; i < v->count; i++) {
-    v->cell[i] = lval_eval(v->cell[i]);
+    v->cell[i] = lval_eval(e, v->cell[i]);
   }
   /* Error checking */
   for (int i = 0; i < v->count; i++) {
@@ -456,14 +609,14 @@ lval *lval_eval_sexpr(lval *v) {
 
   /* Ensure first element is symbol */
   lval *f = lval_pop(v, 0);
-  if (f->type != LVAL_SYM) {
+  if (f->type != LVAL_FUN) {
     lval_del(f);
     lval_del(v);
-    return lval_err("S-expression Does not start with symbol!");
+    return lval_err("First element is not a function!");
   }
 
   /* Call builtin with operator */
-  lval *result = builtin(v, f->sym);
+  lval *result = f->fun(e, v);
   lval_del(f);
   return result;
 }
@@ -517,6 +670,9 @@ int main(int argc, char **argv) {
   puts("Lispy Version 0.0.0.0.1");
   puts("Press Ctrl+c to Exit\n");
 
+  lenv *e = lenv_new();
+  lenv_add_builtins(e);
+
   while (1) {
     // output and get input
     char *input = readline("lispy> ");
@@ -537,9 +693,10 @@ int main(int argc, char **argv) {
     if (mpc_parse("<stdin>", input, Lispy, &r)) {
       // lval result = eval(r.output);
       // lval_println(result);
-      lval *result = lval_eval(lval_read(r.output));
+      lval *result = lval_eval(e, lval_read(r.output));
       lval_println(result);
       lval_del(result);
+
       mpc_ast_delete(r.output);
     } else {
       mpc_err_print(r.error);
@@ -548,6 +705,7 @@ int main(int argc, char **argv) {
 
     free(input);
   }
+  lenv_del(e);
 
   /* Undefine and delete the parsers */
   mpc_cleanup(6, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
