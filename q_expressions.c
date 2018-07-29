@@ -34,6 +34,7 @@ typedef struct lenv lenv;
 lenv *lenv_new(void);
 void lenv_del(lenv *e);
 lval *builtin_eval(lenv *e, lval *a);
+lval *builtin_list(lenv *e, lval *a);
 
 /* Let's define function pointers to allow user-defined operations!
  *
@@ -465,13 +466,47 @@ lval *lval_call(lenv *e, lval *f, lval *a) {
     }
 
     lval *sym = lval_pop(f->formals, 0);
+    if (strcmp(sym->sym, "&") == 0) {
+      if (f->formals->count == 1) {
+        lval_del(a);
+        return lval_err("Function format invalid");
+      }
+
+      /* Next formal should be bound to remaining arguments */
+      lval *next_sym = lval_pop(f->formals, 0);
+      lenv_put(f->env, next_sym, builtin_list(e, a));
+      lval_del(sym);
+      lval_del(next_sym);
+      break;
+    }
+
     lval *val = lval_pop(a, 0);
 
     lenv_put(f->env, sym, val);
     lval_del(sym);
     lval_del(val);
   }
+
+  /* Argument list is now bound so can be cleaned up */
   lval_del(a);
+
+  /* If '&' remains in formal list bind to empty list */
+  if (f->formals->count > 0 && strcmp(f->formals->cell[0]->sym, "&") == 0) {
+    if (f->formals->count != 2) {
+      return lval_err("Function format invalid.");
+    }
+
+    /* Pop and delete '&' symbol */
+    lval_del(lval_pop(f->formals, 0));
+
+    lval *sym = lval_pop(f->formals, 0);
+    lval *val = lval_qexpr();
+
+    lenv_put(f->env, sym, val);
+    lval_del(sym);
+    lval_del(val);
+  }
+
   if (f->formals->count == 0) {
     f->env->par = e;
     return builtin_eval(f->env, lval_add(lval_sexpr(), lval_copy(f->body)));
